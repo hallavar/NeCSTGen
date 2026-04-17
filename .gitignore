@@ -1,0 +1,10 @@
+# Ignore the project-specific virtual environment
+.NeCSTGen-Env/
+
+# generated artifacts
+data/
+models/train_pcap_fullstack/
+output/
+*.pcap
+*.csv
+*.parquet

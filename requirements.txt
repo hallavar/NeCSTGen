@@ -1,0 +1,15 @@
+# Core stack versions mentioned in README.rst (Python 3.6 + TF 2.4.1)
+tensorflow
+numpy==1.19.5
+pandas==1.1.5
+scapy==2.4.3
+scapy-ssl_tls
+
+# Modeling/training dependencies used across scripts/modeling and scripts/pipeline
+scikit-learn
+joblib==1.0.1
+tqdm==4.62.3
+
+# Notebook/analysis helpers (benchmark_programs/NeCSTGen/notebooks/Analysis.ipynb)
+matplotlib==3.3.4
+seaborn==0.11.2

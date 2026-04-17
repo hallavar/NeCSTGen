@@ -20,6 +20,20 @@ import numpy as np
 import pandas as pd
 import math
 import random
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # Fallback if tqdm is unavailable
+    def tqdm(iterable=None, total=None, desc="", unit="", leave=True, **kwargs):
+        if iterable is None:
+            return []
+        if total is None and hasattr(iterable, "__len__"):
+            total = len(iterable)
+        for idx, item in enumerate(iterable, 1):
+            prefix = f"{desc} " if desc else ""
+            suffix = f"{idx}/{total}" if total else f"{idx}"
+            print(f"{prefix}{suffix} {unit}".strip(), end="\r" if leave else "\n")
+            yield item
+        print()
 
 # Get version
 from platform import python_version
@@ -521,7 +535,7 @@ indexes_flow['quantity'] = indexes_flow['index_max'] - \
 
 # Extract the different index of flow
 # The first and last four
-for i in range(LIMIT_FLOW_PART):
+for i in tqdm(range(LIMIT_FLOW_PART), desc="Preparing flow edge indexes", unit="part"):
     df_raw[f"index_min_{i}"] = df_raw['index_min']+i - df_raw.index.values
     indexes_flow[f"index_min_{i}"] = indexes_flow['index_min']+i
     
@@ -596,7 +610,7 @@ cols = ['columns_0', 'columns_1']
 
 
 # Generate start
-for i in range(LIMIT_FLOW_PART):
+for i in tqdm(range(LIMIT_FLOW_PART), desc="Assigning start clusters", unit="part"):
     # Extract values
     cond = (df_concat[f'index_min_{i}'] == 0)
     arr_input = df_concat[cond][cols].values
@@ -637,7 +651,7 @@ for j in range(gmm.n_components):
 
 cond = True
 
-for i in range(LIMIT_FLOW_PART):
+for i in tqdm(range(LIMIT_FLOW_PART), desc="Building body cluster mask", unit="part"):
     # Extract values
     cond = cond & ((df_concat[f'index_min_{i}'] != 0) &
             (df_concat[f'index_max_{i}'] != 0))
@@ -657,7 +671,7 @@ min_val_gmm += gmm.n_components
 
     
 # Generate End
-for i in range(LIMIT_FLOW_PART):
+for i in tqdm(range(LIMIT_FLOW_PART), desc="Assigning end clusters", unit="part"):
     # Extract values
     cond = (df_concat[f'index_max_{i}'] == 0)
     arr_input = df_concat[cond][cols].values
@@ -690,13 +704,13 @@ for i in range(LIMIT_FLOW_PART):
 df_concat["flow_part"] = 1
 
 counter = 0
-for i in range(LIMIT_FLOW_PART):
+for i in tqdm(range(LIMIT_FLOW_PART), desc="Tagging flow starts", unit="part"):
     cond = (df_concat[f'index_min_{i}'] == 0)
     df_concat.loc[cond, "flow_part"] = counter
     counter += (1/LIMIT_FLOW_PART)
 
 counter = 0 
-for i in range(LIMIT_FLOW_PART):
+for i in tqdm(range(LIMIT_FLOW_PART), desc="Tagging flow ends", unit="part"):
     cond = (df_concat[f'index_max_{i}'] == 0)
     df_concat.loc[cond, "flow_part"] = counter
     counter += (1/LIMIT_FLOW_PART)
@@ -789,7 +803,7 @@ else:
     # By default direction is 0
     data["direction"] = 0
 
-    for i in range(df_flow_first.shape[0]):
+    for i in tqdm(range(df_flow_first.shape[0]), desc="Computing flow directions", unit="flow"):
         ip_src = df_flow_first.iloc[i]['ip_src']
         ip_dst = df_flow_first.iloc[i]['ip_dst']
         sport = df_flow_first.iloc[i]['sport']

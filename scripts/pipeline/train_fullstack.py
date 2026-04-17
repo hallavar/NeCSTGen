@@ -36,7 +36,6 @@ from tensorflow.keras import layers
 VAE_FEATURES = [
     "length_total",
     "header_length",
-    "payload_length",
     "rate",
     "time_diff",
     "rolling_rate_byte_sec",
@@ -47,6 +46,15 @@ VAE_FEATURES = [
 
 # Flow-level features (sequence modeling)
 FLOW_FEATURES = ["length_total", "time_diff"]
+
+LOG_FEATURES = {
+    "rate",
+    "time_diff",
+    "rolling_rate_byte_sec",
+    "rolling_rate_byte_min",
+    "rolling_rate_packet_sec",
+    "rolling_rate_packet_min",
+}
 
 
 def build_vae(input_dim: int, latent_dim: int = 8) -> Tuple[keras.Model, keras.Model, keras.Model]:
@@ -84,7 +92,7 @@ def build_vae(input_dim: int, latent_dim: int = 8) -> Tuple[keras.Model, keras.M
 
     vae = keras.Model(inputs, outputs, name="vae")
     vae.add_loss(vae_loss)
-    vae.compile(optimizer=keras.optimizers.Adam(1e-3))
+    vae.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0))
     return encoder, decoder, vae
 
 
@@ -119,10 +127,20 @@ def train_fullstack(
     max_flow_len: int = 64,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    vae_data = df[VAE_FEATURES].astype(float).copy()
+    for col in LOG_FEATURES & set(vae_data.columns):
+        vae_data[col] = np.log1p(np.clip(vae_data[col], a_min=0, a_max=None))
+    constant_cols = [
+        col for col in VAE_FEATURES if np.isclose(vae_data[col].std(ddof=0), 0.0)
+    ]
+    if constant_cols:
+        raise ValueError(
+            f"VAE features contain constant columns that break training: {constant_cols}"
+        )
+        
     # Packet VAE
     scaler_pkt = StandardScaler()
-    X_pkt = scaler_pkt.fit_transform(df[VAE_FEATURES].astype(float))
+    X_pkt = scaler_pkt.fit_transform(vae_data)
 
     encoder, decoder, vae = build_vae(input_dim=X_pkt.shape[1], latent_dim=latent_dim)
     vae.fit(X_pkt, epochs=15, batch_size=256, shuffle=True, verbose=1)

@@ -29,6 +29,20 @@ import numpy as np
 import pandas as pd
 import math
 import random
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # Fallback if tqdm is unavailable
+    def tqdm(iterable=None, total=None, desc="", unit="", leave=True, **kwargs):
+        if iterable is None:
+            return []
+        if total is None and hasattr(iterable, "__len__"):
+            total = len(iterable)
+        for idx, item in enumerate(iterable, 1):
+            prefix = f"{desc} " if desc else ""
+            suffix = f"{idx}/{total}" if total else f"{idx}"
+            print(f"{prefix}{suffix} {unit}".strip(), end="\r" if leave else "\n")
+            yield item
+        print()
 
 # Get version
 from platform import python_version
@@ -349,7 +363,7 @@ def gen_seq_labels(generator,
         
     flows_id = []
     seq_true = []
-    for i in range(nb_flow_ref):
+    for i in tqdm(range(nb_flow_ref), desc="Collecting reference flows", unit="flow"):
         
         # Extract flow in order
         val = df_raw[
@@ -436,7 +450,7 @@ def gen_pcap(model,
     indexes = np.arange(0, nb_flow_gen)
     np.random.shuffle(indexes)
     
-    for i in range(nb_flow_gen):
+    for i in tqdm(range(nb_flow_gen), desc="Generating flows", unit="flow"):
         
         if (flows_length_gen is None):
             flow_length_gen = len(
@@ -592,7 +606,8 @@ def write_to_pcap(model, dict_flags,
 
     # + timesteps pour empecher l'ecriture de chose "bizarre"
     #for i in range(timesteps, num_packets): #+timesteps
-    for i in range(1, num_packets): # First packet is trash !
+    for i in tqdm(range(1, num_packets), total=max(num_packets-1, 0),
+                  desc="Generating packets", unit="pkt"): # First packet is trash !
 
         # Get data
         inputs = inputs[0:1, -timesteps:, :]
@@ -1352,7 +1367,7 @@ indexes_flow['quantity'] = indexes_flow['index_max'] - \
 
 # Extract the different index of flow
 # The first and last four
-for i in range(4):
+for i in tqdm(range(4), desc="Preparing flow edge indexes", unit="part"):
     df_raw[f"index_min_{i}"] = df_raw['index_min']+i - df_raw.index.values
     indexes_flow[f"index_min_{i}"] = indexes_flow['index_min']+i
     
@@ -1429,7 +1444,7 @@ cols = ['columns_0', 'columns_1']
 
 
 # Generate start
-for i in range(limit):    
+for i in tqdm(range(limit), desc="Assigning start clusters", unit="part"):
     # Extract values
     cond = (df_concat[f'index_min_{i}'] == 0)
     arr_input = df_concat[cond][cols].values
@@ -1470,7 +1485,7 @@ for j in range(gmm.n_components):
 
 cond = True
 
-for i in range(limit):
+for i in tqdm(range(limit), desc="Building body cluster mask", unit="part"):
     # Extract values
     cond = cond & ((df_concat[f'index_min_{i}'] != 0) &
             (df_concat[f'index_max_{i}'] != 0))
@@ -1490,7 +1505,7 @@ min_val_gmm += gmm.n_components
 
     
 # Generate End
-for i in range(limit):
+for i in tqdm(range(limit), desc="Assigning end clusters", unit="part"):
     # Extract values
     cond = (df_concat[f'index_max_{i}'] == 0)
     arr_input = df_concat[cond][cols].values

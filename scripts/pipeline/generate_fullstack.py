@@ -4,6 +4,8 @@ Generate a synthetic PCAP using the VAE+GMM+LSTM models trained by train_fullsta
 """
 
 import argparse
+import ctypes.util
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import pathlib
 import time
@@ -11,8 +13,36 @@ from typing import Iterable, List, Tuple
 
 import joblib
 import numpy as np
+import pandas as pd
 import tensorflow as tf
+
+_orig_find_library = ctypes.util.find_library
+
+
+def _prefer_glibc(name: str):
+    if name == "libc":
+        return "/lib/x86_64-linux-gnu/libc.so.6"
+    return _orig_find_library(name)
+
+
+ctypes.util.find_library = _prefer_glibc
+
 from scapy.all import Ether, IP, UDP, TCP, Raw, wrpcap
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # Fallback if tqdm is unavailable
+    def tqdm(iterable=None, total=None, desc="", unit="", leave=True, **kwargs):
+        if iterable is None:
+            return []
+        if total is None and hasattr(iterable, "__len__"):
+            total = len(iterable)
+        for idx, item in enumerate(iterable, 1):
+            prefix = f"{desc} " if desc else ""
+            suffix = f"{idx}/{total}" if total else f"{idx}"
+            print(f"{prefix}{suffix} {unit}".strip(), end="\r" if leave else "\n")
+            yield item
+        print()
 
 
 def sample_with_probs(values: np.ndarray, probs: np.ndarray, size: int = 1):
@@ -38,6 +68,51 @@ def decode_packets(decoder, scaler_pkt, gmm, num_packets: int) -> pd.DataFrame:
     feats_scaled = decoder.predict(z, verbose=0)
     feats = scaler_pkt.inverse_transform(feats_scaled)
     return feats
+
+
+_fullstack_ctx = {}
+
+
+def _init_fullstack_ctx(models_dir: str):
+    """Load models once per worker process."""
+    global _fullstack_ctx
+    if _fullstack_ctx.get("models_dir") == models_dir:
+        return
+    scaler_pkt, scaler_flow, gmm, meta, encoder, decoder, lstm, cfg = load_models(pathlib.Path(models_dir))
+    _fullstack_ctx = {
+        "models_dir": models_dir,
+        "scaler_pkt": scaler_pkt,
+        "scaler_flow": scaler_flow,
+        "gmm": gmm,
+        "meta": meta,
+        "encoder": encoder,
+        "decoder": decoder,
+        "lstm": lstm,
+    }
+
+
+def _build_flow_fullstack(idx: int) -> Tuple[int, List]:
+    """Worker entrypoint: build a single flow starting at t=0, using global ctx."""
+    ctx = _fullstack_ctx
+    meta = ctx["meta"]
+    flow_len = int(sample_with_probs(meta["flow_size_values"], meta["flow_size_probs"], 1)[0])
+    endpoints = sample_with_probs(meta["endpoints_values"], meta["endpoints_probs"], 1)[0]
+    ports = sample_with_probs(meta["ports_values"], meta["ports_probs"], 1)[0]
+    app = sample_with_probs(meta["apps_values"], meta["apps_probs"], 1)[0]
+
+    pkts = build_packets(
+        flow_len=flow_len,
+        endpoints=endpoints,
+        ports=ports,
+        app=app,
+        lstm=ctx["lstm"],
+        scaler_flow=ctx["scaler_flow"],
+        decoder=ctx["decoder"],
+        scaler_pkt=ctx["scaler_pkt"],
+        gmm=ctx["gmm"],
+        base_time=0.0,
+    )
+    return idx, pkts
 
 
 def build_packets(
@@ -90,32 +165,62 @@ def build_packets(
     return packets
 
 
-def generate_pcap(models_dir: pathlib.Path, output_pcap: pathlib.Path, num_flows: int, start_time: float):
-    scaler_pkt, scaler_flow, gmm, meta, encoder, decoder, lstm, cfg = load_models(models_dir)
+def generate_pcap(
+    models_dir: pathlib.Path,
+    output_pcap: pathlib.Path,
+    num_flows: int,
+    start_time: float,
+    workers: int = 1,
+):
+    flow_packets: List[List] = [None] * num_flows  # type: ignore
+    workers_local = max(1, workers)
 
+    if workers_local == 1:
+        scaler_pkt, scaler_flow, gmm, meta, encoder, decoder, lstm, cfg = load_models(models_dir)
+        for i in range(num_flows):
+            flow_len = int(sample_with_probs(meta["flow_size_values"], meta["flow_size_probs"], 1)[0])
+            endpoints = sample_with_probs(meta["endpoints_values"], meta["endpoints_probs"], 1)[0]
+            ports = sample_with_probs(meta["ports_values"], meta["ports_probs"], 1)[0]
+            app = sample_with_probs(meta["apps_values"], meta["apps_probs"], 1)[0]
+
+            pkts = build_packets(
+                flow_len=flow_len,
+                endpoints=endpoints,
+                ports=ports,
+                app=app,
+                lstm=lstm,
+                scaler_flow=scaler_flow,
+                decoder=decoder,
+                scaler_pkt=scaler_pkt,
+                gmm=gmm,
+                base_time=0.0,
+            )
+            flow_packets[i] = pkts
+            print(f"Flow {i} created with {len(pkts)} packets")
+    else:
+        with ProcessPoolExecutor(
+            max_workers=workers_local,
+            initializer=_init_fullstack_ctx,
+            initargs=(str(models_dir),),
+        ) as pool:
+            futures = [pool.submit(_build_flow_fullstack, i) for i in range(num_flows)]
+            for fut in as_completed(futures):
+                idx, pkts = fut.result()
+                flow_packets[idx] = pkts
+                print(f"Flow {idx} created with {len(pkts)} packets")
+
+    # Normalize timestamps to a single sequential timeline
     packets: List = []
     base_time = start_time
-
-    for _ in range(num_flows):
-        flow_len = int(sample_with_probs(meta["flow_size_values"], meta["flow_size_probs"], 1)[0])
-        endpoints = sample_with_probs(meta["endpoints_values"], meta["endpoints_probs"], 1)[0]
-        ports = sample_with_probs(meta["ports_values"], meta["ports_probs"], 1)[0]
-        app = sample_with_probs(meta["apps_values"], meta["apps_probs"], 1)[0]
-
-        pkts = build_packets(
-            flow_len=flow_len,
-            endpoints=endpoints,
-            ports=ports,
-            app=app,
-            lstm=lstm,
-            scaler_flow=scaler_flow,
-            decoder=decoder,
-            scaler_pkt=scaler_pkt,
-            gmm=gmm,
-            base_time=base_time,
-        )
-        if pkts:
-            base_time = pkts[-1].time
+    for pkts in flow_packets:
+        if not pkts:
+            continue
+        first_ts = pkts[0].time
+        shift = base_time - first_ts
+        for pkt in pkts:
+            pkt.time += shift
+        duration = pkts[-1].time - pkts[0].time
+        base_time += duration
         packets.extend(pkts)
 
     output_pcap.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +233,7 @@ def main(argv: Iterable[str] = None) -> None:
     parser.add_argument("--models-dir", required=True, help="Directory produced by train_fullstack.py")
     parser.add_argument("--output-pcap", required=True, help="Where to write the generated PCAP")
     parser.add_argument("--num-flows", type=int, default=10)
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for flow generation")
     parser.add_argument("--start-time", type=float, default=None, help="Unix start time")
     args = parser.parse_args(argv)
 
@@ -137,6 +243,7 @@ def main(argv: Iterable[str] = None) -> None:
         output_pcap=pathlib.Path(args.output_pcap),
         num_flows=args.num_flows,
         start_time=start_time,
+        workers=args.workers,
     )
 
 

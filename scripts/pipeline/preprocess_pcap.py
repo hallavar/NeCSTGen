@@ -14,12 +14,25 @@ the training/generation helpers in scripts/pipeline.
 """
 
 import argparse
+import ctypes.util
 import pathlib
 from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
+
+_orig_find_library = ctypes.util.find_library
+
+
+def _prefer_glibc(name: str):
+    if name == "libc":
+        return "/lib/x86_64-linux-gnu/libc.so.6"
+    return _orig_find_library(name)
+
+
+ctypes.util.find_library = _prefer_glibc
+
 from scapy.all import PcapReader
 
 

@@ -4,6 +4,7 @@ Generate a synthetic PCAP from the models trained by train_models.py.
 """
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import pathlib
 import time
 from typing import Iterable, List, Tuple
@@ -12,6 +13,12 @@ import joblib
 import numpy as np
 import pandas as pd
 from scapy.all import IP, UDP, TCP, Raw, wrpcap, Ether
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # Fallback if tqdm is unavailable
+    def tqdm(iterable=None, total=None, desc="", unit="", leave=True, **kwargs):
+        return iterable if iterable is not None else []
 
 NUMERIC_COLS = [
     "length_total",
@@ -46,51 +53,99 @@ def build_packet(
     return pkt
 
 
-def generate_packets(models_path: pathlib.Path, num_flows: int, base_time: float) -> List:
+_packet_ctx = {}
+
+
+def _init_packet_ctx(models_path: str):
+    global _packet_ctx
+    if _packet_ctx.get("models_path") == models_path:
+        return
     artifacts = joblib.load(models_path)
-    scaler = artifacts["scaler"]
-    gmm = artifacts["packet_gmm"]
+    _packet_ctx = {"models_path": models_path, "artifacts": artifacts}
 
-    flow_size_values = artifacts["flow_size_values"]
-    flow_size_probs = artifacts["flow_size_probs"]
-    endpoints_values = artifacts["endpoints_values"]
-    endpoints_probs = artifacts["endpoints_probs"]
-    ports_values = artifacts["ports_values"]
-    ports_probs = artifacts["ports_probs"]
-    apps_values = artifacts["apps_values"]
-    apps_probs = artifacts["apps_probs"]
 
-    packets = []
+def _build_flow_packets(idx: int) -> Tuple[int, List]:
+    ctx = _packet_ctx["artifacts"]
+    scaler = ctx["scaler"]
+    gmm = ctx["packet_gmm"]
+    flow_size_values = ctx["flow_size_values"]
+    flow_size_probs = ctx["flow_size_probs"]
+    endpoints_values = ctx["endpoints_values"]
+    endpoints_probs = ctx["endpoints_probs"]
+    ports_values = ctx["ports_values"]
+    ports_probs = ctx["ports_probs"]
+    apps_values = ctx["apps_values"]
+    apps_probs = ctx["apps_probs"]
+
+    packets_local: List = []
+    current_time_local = 0.0
+
+    flow_len = int(sample_with_probs(flow_size_values, flow_size_probs, size=1)[0])
+    ip_src, ip_dst = sample_with_probs(endpoints_values, endpoints_probs, size=1)[0]
+    sport, dport = sample_with_probs(ports_values, ports_probs, size=1)[0]
+    app = sample_with_probs(apps_values, apps_probs, size=1)[0]
+    use_tcp = str(app).upper() in {"HTTP", "SSH", "FTP", "SMTP", "TELNET"}
+
+    samples, _ = gmm.sample(flow_len)
+    features = pd.DataFrame(scaler.inverse_transform(samples), columns=NUMERIC_COLS)
+    features["time_diff"] = features["time_diff"].clip(lower=0.0001)
+    features["payload_length"] = features["payload_length"].clip(lower=0).astype(int)
+
+    timestamps: List[float] = []
+    for td in features["time_diff"]:
+        current_time_local += float(td)
+        timestamps.append(current_time_local)
+
+    for ts, payload_len in zip(timestamps, features["payload_length"]):
+        pkt = build_packet(
+            ip_src=ip_src,
+            ip_dst=ip_dst,
+            sport=int(sport),
+            dport=int(dport),
+            payload_len=int(payload_len),
+            timestamp=ts,
+            use_tcp=use_tcp,
+        )
+        packets_local.append(pkt)
+
+    return idx, packets_local
+
+
+def generate_packets(models_path: pathlib.Path, num_flows: int, base_time: float, workers: int = 1) -> List:
+    packets: List = []
+    flow_packets: List[List] = [None] * num_flows  # type: ignore
+    workers_local = max(1, workers)
+
+    if workers_local == 1:
+        _init_packet_ctx(str(models_path))
+        for i in range(num_flows):
+            _, pkts = _build_flow_packets(i)
+            flow_packets[i] = pkts
+            print(f"Flow {i} created with {len(pkts)} packets")
+    else:
+        with ProcessPoolExecutor(
+            max_workers=workers_local,
+            initializer=_init_packet_ctx,
+            initargs=(str(models_path),),
+        ) as pool:
+            futures = [pool.submit(_build_flow_packets, i) for i in range(num_flows)]
+            for fut in as_completed(futures):
+                idx, pkts = fut.result()
+                flow_packets[idx] = pkts
+                print(f"Flow {idx} created with {len(pkts)} packets")
+
+    # Normalize timestamps to a single timeline (sequential concatenation)
     current_time = base_time
-
-    for _ in range(num_flows):
-        flow_len = int(sample_with_probs(flow_size_values, flow_size_probs, size=1)[0])
-        ip_src, ip_dst = sample_with_probs(endpoints_values, endpoints_probs, size=1)[0]
-        sport, dport = sample_with_probs(ports_values, ports_probs, size=1)[0]
-        app = sample_with_probs(apps_values, apps_probs, size=1)[0]
-        use_tcp = str(app).upper() in {"HTTP", "SSH", "FTP", "SMTP", "TELNET"}
-
-        samples, _ = gmm.sample(flow_len)
-        features = pd.DataFrame(scaler.inverse_transform(samples), columns=NUMERIC_COLS)
-        features["time_diff"] = features["time_diff"].clip(lower=0.0001)
-        features["payload_length"] = features["payload_length"].clip(lower=0).astype(int)
-
-        timestamps = []
-        for td in features["time_diff"]:
-            current_time += float(td)
-            timestamps.append(current_time)
-
-        for ts, payload_len in zip(timestamps, features["payload_length"]):
-            pkt = build_packet(
-                ip_src=ip_src,
-                ip_dst=ip_dst,
-                sport=int(sport),
-                dport=int(dport),
-                payload_len=int(payload_len),
-                timestamp=ts,
-                use_tcp=use_tcp,
-            )
-            packets.append(pkt)
+    for pkts in flow_packets:
+        if not pkts:
+            continue
+        first_ts = pkts[0].time
+        shift = current_time - first_ts
+        for pkt in pkts:
+            pkt.time += shift
+        duration = pkts[-1].time - pkts[0].time
+        current_time += duration
+        packets.extend(pkts)
 
     return packets
 
@@ -100,6 +155,7 @@ def main(argv: Iterable[str] = None) -> None:
     parser.add_argument("--models", required=True, help="Path to traffic_models.joblib")
     parser.add_argument("--output-pcap", required=True, help="Output PCAP path")
     parser.add_argument("--num-flows", type=int, default=10, help="How many flows to synthesize")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for flow generation")
     parser.add_argument(
         "--start-time", type=float, default=None, help="Unix start time for generated packets"
     )
@@ -110,6 +166,7 @@ def main(argv: Iterable[str] = None) -> None:
         models_path=pathlib.Path(args.models),
         num_flows=args.num_flows,
         base_time=base_time,
+        workers=args.workers,
     )
     out_path = pathlib.Path(args.output_pcap)
     out_path.parent.mkdir(parents=True, exist_ok=True)
