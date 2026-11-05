@@ -8,6 +8,7 @@ import ctypes.util
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import pathlib
+import sys
 import time
 from typing import Iterable, List, Tuple
 
@@ -15,6 +16,9 @@ import joblib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "utils"))
+from random_seed import derive_seed, environment_seed, seed_rngs
 
 _orig_find_library = ctypes.util.find_library
 
@@ -73,13 +77,14 @@ def decode_packets(decoder, scaler_pkt, gmm, num_packets: int) -> pd.DataFrame:
 _fullstack_ctx = {}
 
 
-def _init_fullstack_ctx(models_dir: str):
+def _init_fullstack_ctx(models_dir: str, seed: int = 0):
     """Load models once per worker process."""
     global _fullstack_ctx
     if _fullstack_ctx.get("models_dir") == models_dir:
         return
     scaler_pkt, scaler_flow, gmm, meta, encoder, decoder, lstm, cfg = load_models(pathlib.Path(models_dir))
     _fullstack_ctx = {
+        "seed": seed,
         "models_dir": models_dir,
         "scaler_pkt": scaler_pkt,
         "scaler_flow": scaler_flow,
@@ -94,6 +99,9 @@ def _init_fullstack_ctx(models_dir: str):
 def _build_flow_fullstack(idx: int) -> Tuple[int, List]:
     """Worker entrypoint: build a single flow starting at t=0, using global ctx."""
     ctx = _fullstack_ctx
+    flow_seed = derive_seed(ctx["seed"], "flow", idx)
+    seed_rngs(flow_seed, tensorflow=True)
+    ctx["gmm"].random_state = np.random.RandomState(flow_seed)
     meta = ctx["meta"]
     flow_len = int(sample_with_probs(meta["flow_size_values"], meta["flow_size_probs"], 1)[0])
     endpoints = sample_with_probs(meta["endpoints_values"], meta["endpoints_probs"], 1)[0]
@@ -171,13 +179,18 @@ def generate_pcap(
     num_flows: int,
     start_time: float,
     workers: int = 1,
+    seed: int = 0,
 ):
+    seed_rngs(seed, tensorflow=True)
     flow_packets: List[List] = [None] * num_flows  # type: ignore
     workers_local = max(1, workers)
 
     if workers_local == 1:
         scaler_pkt, scaler_flow, gmm, meta, encoder, decoder, lstm, cfg = load_models(models_dir)
         for i in range(num_flows):
+            flow_seed = derive_seed(seed, "flow", i)
+            seed_rngs(flow_seed, tensorflow=True)
+            gmm.random_state = np.random.RandomState(flow_seed)
             flow_len = int(sample_with_probs(meta["flow_size_values"], meta["flow_size_probs"], 1)[0])
             endpoints = sample_with_probs(meta["endpoints_values"], meta["endpoints_probs"], 1)[0]
             ports = sample_with_probs(meta["ports_values"], meta["ports_probs"], 1)[0]
@@ -201,7 +214,7 @@ def generate_pcap(
         with ProcessPoolExecutor(
             max_workers=workers_local,
             initializer=_init_fullstack_ctx,
-            initargs=(str(models_dir),),
+            initargs=(str(models_dir), seed),
         ) as pool:
             futures = [pool.submit(_build_flow_fullstack, i) for i in range(num_flows)]
             for fut in as_completed(futures):
@@ -235,6 +248,7 @@ def main(argv: Iterable[str] = None) -> None:
     parser.add_argument("--num-flows", type=int, default=10)
     parser.add_argument("--workers", type=int, default=1, help="Parallel workers for flow generation")
     parser.add_argument("--start-time", type=float, default=None, help="Unix start time")
+    parser.add_argument("--seed", type=int, default=environment_seed(generation=True))
     args = parser.parse_args(argv)
 
     start_time = args.start_time if args.start_time is not None else time.time()
@@ -244,6 +258,7 @@ def main(argv: Iterable[str] = None) -> None:
         num_flows=args.num_flows,
         start_time=start_time,
         workers=args.workers,
+        seed=args.seed,
     )
 
 

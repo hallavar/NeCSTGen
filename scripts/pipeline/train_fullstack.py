@@ -20,6 +20,7 @@ Outputs (in --output-dir):
 import argparse
 import json
 import pathlib
+import sys
 from typing import Dict, Iterable, List, Tuple
 
 import joblib
@@ -30,6 +31,9 @@ from sklearn.preprocessing import StandardScaler
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "utils"))
+from random_seed import environment_seed, seed_rngs
 
 
 # Columns used for packet-level VAE
@@ -125,7 +129,9 @@ def train_fullstack(
     latent_dim: int = 8,
     gmm_components: int = 8,
     max_flow_len: int = 64,
+    seed: int = 0,
 ) -> None:
+    seed_rngs(seed, tensorflow=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     vae_data = df[VAE_FEATURES].astype(float).copy()
     for col in LOG_FEATURES & set(vae_data.columns):
@@ -145,7 +151,7 @@ def train_fullstack(
     encoder, decoder, vae = build_vae(input_dim=X_pkt.shape[1], latent_dim=latent_dim)
     vae.fit(X_pkt, epochs=15, batch_size=256, shuffle=True, verbose=1)
     z_mean, z_log_var, z = encoder.predict(X_pkt, batch_size=512, verbose=0)
-    gmm = GaussianMixture(n_components=gmm_components, covariance_type="full", random_state=0)
+    gmm = GaussianMixture(n_components=gmm_components, covariance_type="full", random_state=seed)
     gmm.fit(z_mean)
 
     # Flow LSTM
@@ -200,6 +206,7 @@ def train_fullstack(
         "latent_dim": latent_dim,
         "gmm_components": gmm_components,
         "max_flow_len": max_flow_len,
+        "seed": seed,
         "vae_features": VAE_FEATURES,
         "flow_features": FLOW_FEATURES,
     }
@@ -214,6 +221,7 @@ def main(argv: Iterable[str] = None) -> None:
     parser.add_argument("--latent-dim", type=int, default=8)
     parser.add_argument("--gmm-components", type=int, default=8)
     parser.add_argument("--max-flow-len", type=int, default=64)
+    parser.add_argument("--seed", type=int, default=environment_seed())
     args = parser.parse_args(argv)
 
     df = pd.read_csv(args.data)
@@ -223,6 +231,7 @@ def main(argv: Iterable[str] = None) -> None:
         latent_dim=args.latent_dim,
         gmm_components=args.gmm_components,
         max_flow_len=args.max_flow_len,
+        seed=args.seed,
     )
 
 

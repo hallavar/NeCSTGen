@@ -16,44 +16,35 @@ fi
 
 cd "${REPO_ROOT}"
 
-DATASETS_DIR="${DATASETS_DIR:-/media/datasets/campus_traffic/dataset_april_imc_paper}"
+DATASETS_DIR="${DATASETS_DIR:-/media/datasets/aschoen_datasets/dataset_campus}"
 PCAP_PATH="${TRAIN_PCAP:-${DATASETS_DIR}/train.pcap}"
-TEST_PCAP="${TEST_PCAP:-${DATASETS_DIR}/test.pcap}"
-RUN_NAME="${RUN_NAME:-train_pcap}"
-DATA_DIR="${NECSTGEN_DIR}/data/${RUN_NAME}"
+REFERENCE_PCAP="${REFERENCE_PCAP:-${TEST_PCAP:-${DATASETS_DIR}/reference.pcap}}"
+RUN_NAME="${RUN_NAME:-campus_reference_size}"
+DATA_DIR="${NECSTGEN_DATA_DIR:-${NECSTGEN_DIR}/data/${RUN_NAME}}"
 PROC_CSV="${DATA_DIR}/packets_processed.csv"
-MODELS_DIR="${NECSTGEN_DIR}/models/${RUN_NAME}_fullstack"
-OUTPUT_DIR="${NECSTGEN_DIR}/output/${RUN_NAME}"
-OUTPUT_PCAP="${OUTPUT_DIR}/synthetic.pcap"
+MODELS_DIR="${NECSTGEN_MODELS_DIR:-${NECSTGEN_DIR}/models/${RUN_NAME}_fullstack}"
+OUTPUT_DIR="${NECSTGEN_OUTPUT_DIR:-${NECSTGEN_DIR}/output/${RUN_NAME}}"
 FINAL_PCAP="${FINAL_PCAP:-${DATASETS_DIR}/necstgen.pcap}"
 LATENT_DIM="${LATENT_DIM:-8}"
 GMM_COMPONENTS="${GMM_COMPONENTS:-8}"
 MAX_FLOW_LEN="${MAX_FLOW_LEN:-64}"
-TRAFFIC_DURATION_SECONDS="${TRAFFIC_DURATION_SECONDS:-600}"
-TARGET_FLOWS="${TARGET_FLOWS:-}"
+TARGET_BYTES="${TARGET_BYTES:-0}"
 WORKERS="${WORKERS:-1}"
+
+if [[ "${1:-}" == "--generate-batch" ]]; then
+  "${PYTHON_BIN}" "${NECSTGEN_DIR}/scripts/pipeline/generate_fullstack.py" \
+    --models-dir "${MODELS_DIR}" --output-pcap "$4" --num-flows "$2" --workers "${WORKERS}"
+  exit 0
+fi
 
 if [[ ! -f "${PCAP_PATH}" ]]; then
   echo "Missing training PCAP: ${PCAP_PATH}" >&2
   exit 1
 fi
 
-if [[ ! -f "${TEST_PCAP}" ]]; then
-  echo "Missing test/reference PCAP: ${TEST_PCAP}" >&2
-  exit 1
-fi
-
-if [[ -z "${TARGET_FLOWS:-}" ]]; then
-  echo "[NeCSTGen] Counting target flows in first ${TRAFFIC_DURATION_SECONDS}s of ${TEST_PCAP}"
-  TARGET_FLOWS="$("${PYTHON_BIN}" "${REPO_ROOT}/benchmark_programs/utils/pcap_flow_count.py" \
-    --pcap "${TEST_PCAP}" --duration "${TRAFFIC_DURATION_SECONDS}")"
-  echo "[NeCSTGen] Target flow count: ${TARGET_FLOWS}"
-else
-  echo "[NeCSTGen] Using TARGET_FLOWS=${TARGET_FLOWS}"
-fi
-
-NUM_FLOWS="${NUM_FLOWS:-${TARGET_FLOWS}}"
-echo "[NeCSTGen] Using NUM_FLOWS=${NUM_FLOWS}"
+TARGET_BYTES="$("${PYTHON_BIN}" "${REPO_ROOT}/benchmark_programs/utils/pcap_size.py" target \
+  --reference "${REFERENCE_PCAP}" --target-bytes "${TARGET_BYTES}")"
+echo "[NeCSTGen] Target PCAP size: ${TARGET_BYTES} bytes"
 
 mkdir -p "${DATA_DIR}" "${MODELS_DIR}" "${OUTPUT_DIR}"
 
@@ -70,18 +61,11 @@ echo "[NeCSTGen] Training models into ${MODELS_DIR}"
   --gmm-components "${GMM_COMPONENTS}" \
   --max-flow-len "${MAX_FLOW_LEN}"
 
-echo "[NeCSTGen] Generating synthetic PCAP (${OUTPUT_PCAP})"
-"${PYTHON_BIN}" "${NECSTGEN_DIR}/scripts/pipeline/generate_fullstack.py" \
-  --models-dir "${MODELS_DIR}" \
-  --output-pcap "${OUTPUT_PCAP}" \
-  --num-flows "${NUM_FLOWS}" \
-  --workers "${WORKERS}"
-
-echo "[NeCSTGen] Trimming to ${TRAFFIC_DURATION_SECONDS}s and rebasing to test.pcap"
-"${PYTHON_BIN}" "${REPO_ROOT}/benchmark_programs/utils/trim_pcap.py" \
-  --input "${OUTPUT_PCAP}" \
-  --output "${FINAL_PCAP}" \
-  --duration "${TRAFFIC_DURATION_SECONDS}" \
-  --reference-pcap "${TEST_PCAP}"
+export PYTHON_BIN RUN_NAME WORKERS
+export NECSTGEN_DATA_DIR="${DATA_DIR}" NECSTGEN_MODELS_DIR="${MODELS_DIR}"
+"${PYTHON_BIN}" "${REPO_ROOT}/benchmark_programs/utils/pcap_size.py" generate \
+  --reference "${REFERENCE_PCAP}" --output "${FINAL_PCAP}" --target-bytes "${TARGET_BYTES}" \
+  --batch-units "${NUM_FLOWS:-512}" --max-batches "${MAX_GENERATION_BATCHES:-1000}" \
+  -- bash "${SCRIPT_DIR}/train_on_train_pcap.sh" --generate-batch '{count}' '{batch_dir}' '{output}'
 
 echo "Synthetic PCAP available at ${FINAL_PCAP}"
