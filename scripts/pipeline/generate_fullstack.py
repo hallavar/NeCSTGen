@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
+from autoregressive_inference import autoregressive_flow_features
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "utils"))
 from random_seed import derive_seed, environment_seed, seed_rngs
 
@@ -140,14 +142,7 @@ def build_packets(
     use_tcp = str(app).upper() in {"HTTP", "SSH", "FTP", "SMTP", "TELNET"}
 
     # Generate temporal/size dynamics with LSTM
-    prev = np.zeros((1, 1, len(scaler_flow.mean_)))
-    preds = []
-    for _ in range(flow_len):
-        next_step = lstm.predict(prev, verbose=0)[:, -1, :]
-        preds.append(next_step[0])
-        prev = np.concatenate([prev, next_step[:, None, :]], axis=1)
-
-    preds = np.array(preds)
+    preds = autoregressive_flow_features(lstm, flow_len)
     preds = preds.reshape(flow_len, -1)
     flow_feats = scaler_flow.inverse_transform(preds)
     # Ensure positive time_diff/payload
@@ -196,6 +191,8 @@ def generate_pcap(
             ports = sample_with_probs(meta["ports_values"], meta["ports_probs"], 1)[0]
             app = sample_with_probs(meta["apps_values"], meta["apps_probs"], 1)[0]
 
+            flow_started = time.monotonic()
+            print(f"Flow {i} starting with {flow_len} packets", flush=True)
             pkts = build_packets(
                 flow_len=flow_len,
                 endpoints=endpoints,
@@ -209,7 +206,7 @@ def generate_pcap(
                 base_time=0.0,
             )
             flow_packets[i] = pkts
-            print(f"Flow {i} created with {len(pkts)} packets")
+            print(f"Flow {i} created with {len(pkts)} packets in {time.monotonic()-flow_started:.3f}s", flush=True)
     else:
         with ProcessPoolExecutor(
             max_workers=workers_local,

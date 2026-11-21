@@ -9,6 +9,8 @@ export PYTHONNOUSERSITE="${PYTHONNOUSERSITE:-1}"
 NECSTGEN_VENV="${NECSTGEN_VENV:-${REPO_ROOT}/benchmark_programs/envs/necstgen}"
 if [[ -x "${NECSTGEN_VENV}/bin/python" ]] && "${NECSTGEN_VENV}/bin/python" -c "pass" >/dev/null 2>&1; then
   PYTHON_BIN="${NECSTGEN_VENV}/bin/python"
+  # Conda's legacy CUDA/cuDNN libraries are isolated to this model process.
+  export LD_LIBRARY_PATH="${NECSTGEN_VENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 else
   echo "[NeCSTGen] Skipping unusable venv: ${NECSTGEN_VENV}" >&2
   PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -59,7 +61,10 @@ echo "[NeCSTGen] Training models into ${MODELS_DIR}"
   --output-dir "${MODELS_DIR}" \
   --latent-dim "${LATENT_DIM}" \
   --gmm-components "${GMM_COMPONENTS}" \
-  --max-flow-len "${MAX_FLOW_LEN}"
+  --max-flow-len "${MAX_FLOW_LEN}" \
+  --vae-batch-size "${NECSTGEN_VAE_BATCH_SIZE:-256}" \
+  --encoder-batch-size "${NECSTGEN_ENCODER_BATCH_SIZE:-512}" \
+  --lstm-batch-size "${NECSTGEN_LSTM_BATCH_SIZE:-64}"
 
 export PYTHON_BIN RUN_NAME WORKERS
 export NECSTGEN_DATA_DIR="${DATA_DIR}" NECSTGEN_MODELS_DIR="${MODELS_DIR}"

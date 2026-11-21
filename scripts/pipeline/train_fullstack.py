@@ -130,7 +130,12 @@ def train_fullstack(
     gmm_components: int = 8,
     max_flow_len: int = 64,
     seed: int = 0,
+    vae_batch_size: int = 256,
+    encoder_batch_size: int = 512,
+    lstm_batch_size: int = 64,
 ) -> None:
+    if min(vae_batch_size, encoder_batch_size, lstm_batch_size) < 1:
+        raise ValueError("Batch sizes must be positive")
     seed_rngs(seed, tensorflow=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     vae_data = df[VAE_FEATURES].astype(float).copy()
@@ -149,8 +154,8 @@ def train_fullstack(
     X_pkt = scaler_pkt.fit_transform(vae_data)
 
     encoder, decoder, vae = build_vae(input_dim=X_pkt.shape[1], latent_dim=latent_dim)
-    vae.fit(X_pkt, epochs=15, batch_size=256, shuffle=True, verbose=1)
-    z_mean, z_log_var, z = encoder.predict(X_pkt, batch_size=512, verbose=0)
+    vae.fit(X_pkt, epochs=15, batch_size=vae_batch_size, shuffle=True, verbose=1)
+    z_mean, z_log_var, z = encoder.predict(X_pkt, batch_size=encoder_batch_size, verbose=0)
     gmm = GaussianMixture(n_components=gmm_components, covariance_type="full", random_state=seed)
     gmm.fit(z_mean)
 
@@ -174,7 +179,7 @@ def train_fullstack(
     y_lstm = padded[:, 1:, :]
 
     lstm = build_lstm(input_dim=len(FLOW_FEATURES))
-    lstm.fit(X_lstm, y_lstm, epochs=10, batch_size=64, verbose=1)
+    lstm.fit(X_lstm, y_lstm, epochs=10, batch_size=lstm_batch_size, verbose=1)
 
     # Save artifacts
     joblib.dump(scaler_pkt, output_dir / "scaler_packet.joblib")
@@ -207,6 +212,9 @@ def train_fullstack(
         "gmm_components": gmm_components,
         "max_flow_len": max_flow_len,
         "seed": seed,
+        "vae_batch_size": vae_batch_size,
+        "encoder_batch_size": encoder_batch_size,
+        "lstm_batch_size": lstm_batch_size,
         "vae_features": VAE_FEATURES,
         "flow_features": FLOW_FEATURES,
     }
@@ -222,6 +230,9 @@ def main(argv: Iterable[str] = None) -> None:
     parser.add_argument("--gmm-components", type=int, default=8)
     parser.add_argument("--max-flow-len", type=int, default=64)
     parser.add_argument("--seed", type=int, default=environment_seed())
+    parser.add_argument("--vae-batch-size", type=int, default=256)
+    parser.add_argument("--encoder-batch-size", type=int, default=512)
+    parser.add_argument("--lstm-batch-size", type=int, default=64)
     args = parser.parse_args(argv)
 
     df = pd.read_csv(args.data)
@@ -232,6 +243,9 @@ def main(argv: Iterable[str] = None) -> None:
         gmm_components=args.gmm_components,
         max_flow_len=args.max_flow_len,
         seed=args.seed,
+        vae_batch_size=args.vae_batch_size,
+        encoder_batch_size=args.encoder_batch_size,
+        lstm_batch_size=args.lstm_batch_size,
     )
 
 
